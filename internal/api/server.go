@@ -176,6 +176,9 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+	
+	// quotaEnforcementMiddleware is the quota enforcement middleware (custom feature)
+	quotaEnforcementMiddleware gin.HandlerFunc
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -327,6 +330,8 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
+	// Add quota enforcement middleware if available (custom feature)
+	s.setupQuotaMiddleware(v1)
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -640,6 +645,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Custom quota management endpoints
+		mgmt.GET("/quota/status", s.mgmt.GetQuotaStatus)
+		mgmt.GET("/quota/status-by-key", s.mgmt.GetQuotaStatusByKey)
+		mgmt.POST("/quota/reset", s.mgmt.ResetQuota)
+		mgmt.GET("/quota/extended-keys", s.mgmt.GetExtendedAPIKeys)
 	}
 }
 

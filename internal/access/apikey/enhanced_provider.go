@@ -1,64 +1,26 @@
-package configaccess
+// Package apikey provides an enhanced API key authentication provider
+// with quota and model filtering capabilities.
+package apikey
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/access/apikey"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 )
 
-// quotaTrackerGlobal is a package-level variable for quota tracker injection.
-// This allows us to keep the Register signature unchanged while adding quota support.
-var quotaTrackerGlobal *quota.Tracker
-
-// SetQuotaTracker sets the global quota tracker for enhanced API key authentication.
-// This should be called before Register() to enable quota and model filtering features.
-func SetQuotaTracker(tracker *quota.Tracker) {
-	quotaTrackerGlobal = tracker
-}
-
-// GetQuotaTracker returns the global quota tracker instance.
-func GetQuotaTracker() *quota.Tracker {
-	return quotaTrackerGlobal
-}
-
-// Register ensures the config-access provider is available to the access manager.
-func Register(cfg *sdkconfig.SDKConfig) {
-	if cfg == nil {
-		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
-		quotaTrackerGlobal = nil // Clear quota tracker when config is nil
-		return
-	}
-
-	// If quota tracker is configured and we have extended keys, use enhanced provider
-	if quotaTrackerGlobal != nil && len(cfg.APIKeysExtended) > 0 {
-		apikey.Register(cfg.APIKeys, cfg.APIKeysExtended, quotaTrackerGlobal)
-		return
-	}
-
-	// Fall back to standard provider
-	keys := normalizeKeys(cfg.APIKeys)
-	if len(keys) == 0 {
-		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
-		return
-	}
-
-	sdkaccess.RegisterProvider(
-		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
-	)
-}
-
+// provider implements the authentication provider interface with quota support.
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name         string
+	keys         map[string]struct{}
+	quotaTracker *quota.Tracker
 }
 
-func newProvider(name string, keys []string) *provider {
+// newProvider creates a new enhanced API key provider.
+func newProvider(name string, keys []string, quotaTracker *quota.Tracker) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -67,9 +29,14 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{
+		name:         providerName,
+		keys:         keySet,
+		quotaTracker: quotaTracker,
+	}
 }
 
+// Identifier returns the provider identifier.
 func (p *provider) Identifier() string {
 	if p == nil || p.name == "" {
 		return sdkaccess.DefaultAccessProviderName
@@ -77,6 +44,7 @@ func (p *provider) Identifier() string {
 	return p.name
 }
 
+// Authenticate performs API key authentication and enriches result with quota metadata.
 func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
 	if p == nil {
 		return nil, sdkaccess.NewNotHandledError()
@@ -84,6 +52,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	if len(p.keys) == 0 {
 		return nil, sdkaccess.NewNotHandledError()
 	}
+
 	authHeader := r.Header.Get("Authorization")
 	authHeaderGoogle := r.Header.Get("X-Goog-Api-Key")
 	authHeaderAnthropic := r.Header.Get("X-Api-Key")
@@ -115,17 +84,50 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
-			return &sdkaccess.Result{
+			result := &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
-			}, nil
+			}
+
+			// Enrich result with quota metadata if available
+			p.enrichWithQuotaMetadata(result)
+
+			return result, nil
 		}
 	}
 
 	return nil, sdkaccess.NewInvalidCredentialError()
+}
+
+// enrichWithQuotaMetadata adds quota and model filtering metadata to the authentication result.
+func (p *provider) enrichWithQuotaMetadata(result *sdkaccess.Result) {
+	if p.quotaTracker == nil || !p.quotaTracker.HasConfig(result.Principal) {
+		return
+	}
+
+	config := p.quotaTracker.GetConfig(result.Principal)
+
+	// Add quota information to metadata
+	if config.WeeklyQuota > 0 {
+		allowed, remaining, _ := p.quotaTracker.CheckQuota(result.Principal)
+		result.Metadata["quota-enabled"] = "true"
+		result.Metadata["quota-limit"] = fmt.Sprintf("%d", config.WeeklyQuota)
+		result.Metadata["quota-remaining"] = fmt.Sprintf("%d", remaining)
+		result.Metadata["quota-allowed"] = fmt.Sprintf("%t", allowed)
+	}
+
+	// Add allowed models to metadata
+	if len(config.AllowedModels) > 0 {
+		result.Metadata["allowed-models"] = strings.Join(config.AllowedModels, ",")
+	}
+
+	// Add key name if set
+	if config.Name != "" {
+		result.Metadata["key-name"] = config.Name
+	}
 }
 
 func extractBearerToken(header string) string {
@@ -163,4 +165,27 @@ func normalizeKeys(keys []string) []string {
 		return nil
 	}
 	return normalized
+}
+
+// Register registers the enhanced API key provider with quota tracking.
+func Register(apiKeys []string, extendedKeys []*quota.APIKeyConfig, quotaTracker *quota.Tracker) {
+	// Combine simple keys with extended keys
+	allKeys := make([]string, 0, len(apiKeys)+len(extendedKeys))
+	allKeys = append(allKeys, apiKeys...)
+	for _, cfg := range extendedKeys {
+		if cfg.Key != "" {
+			allKeys = append(allKeys, cfg.Key)
+		}
+	}
+
+	keys := normalizeKeys(allKeys)
+	if len(keys) == 0 {
+		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+		return
+	}
+
+	sdkaccess.RegisterProvider(
+		sdkaccess.AccessProviderTypeConfigAPIKey,
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, quotaTracker),
+	)
 }

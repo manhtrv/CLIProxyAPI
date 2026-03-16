@@ -4,6 +4,8 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import "github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -19,6 +21,10 @@ type SDKConfig struct {
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+
+	// APIKeysExtended provides advanced API key configuration with quota limits and model restrictions.
+	// This is separate from APIKeys to maintain backward compatibility and minimize merge conflicts.
+	APIKeysExtended []*quota.APIKeyConfig `yaml:"api-keys-extended,omitempty" json:"api-keys-extended,omitempty"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

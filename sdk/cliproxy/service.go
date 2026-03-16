@@ -522,6 +522,8 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	// Setup quota enforcement if available (custom feature)
+	s.server.SetupQuotaEnforcement()
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -130,6 +131,10 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	models := h.Models()
+	
+	// Apply API key-based model filtering
+	models = applyClaudeModelFiltering(c, models)
+	
 	firstID := ""
 	lastID := ""
 	if len(models) > 0 {
@@ -324,4 +329,89 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 			Message: msg.Error.Error(),
 		},
 	}
+}
+
+// applyClaudeModelFiltering filters models based on API key's allowed models.
+// Returns the original list if no filtering is configured.
+func applyClaudeModelFiltering(c *gin.Context, allModels []map[string]any) []map[string]any {
+	// Get authentication metadata from Gin context
+	var allowedModelsStr string
+	if meta, exists := c.Get("accessMetadata"); exists {
+		if metaMap, ok := meta.(map[string]string); ok {
+			allowedModelsStr = metaMap["allowed-models"]
+		}
+	}
+
+	if allowedModelsStr == "" {
+		// No restrictions, return all models
+		return allModels
+	}
+
+	// Parse allowed models
+	allowedModels := strings.Split(allowedModelsStr, ",")
+	if len(allowedModels) == 0 {
+		return allModels
+	}
+
+	// Filter models
+	filtered := make([]map[string]any, 0)
+	for _, model := range allModels {
+		modelID, ok := model["id"].(string)
+		if !ok {
+			continue
+		}
+
+		if isClaudeModelAllowed(modelID, allowedModels) {
+			filtered = append(filtered, model)
+		}
+	}
+
+	log.Debugf("Filtered Claude models for API key: %d -> %d models", len(allModels), len(filtered))
+	return filtered
+}
+
+// isClaudeModelAllowed checks if a model ID matches any of the allowed patterns.
+func isClaudeModelAllowed(modelID string, allowedPatterns []string) bool {
+	for _, pattern := range allowedPatterns {
+		pattern = strings.TrimSpace(pattern)
+		if matchClaudeModelPattern(modelID, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchClaudeModelPattern checks if a model ID matches a pattern with wildcard support.
+func matchClaudeModelPattern(modelID, pattern string) bool {
+	// Exact match
+	if modelID == pattern {
+		return true
+	}
+
+	// Wildcard matching
+	if strings.Contains(pattern, "*") {
+		if pattern == "*" {
+			return true
+		}
+
+		// Prefix match: "claude-*"
+		if strings.HasSuffix(pattern, "*") {
+			prefix := strings.TrimSuffix(pattern, "*")
+			return strings.HasPrefix(modelID, prefix)
+		}
+
+		// Suffix match: "*-thinking"
+		if strings.HasPrefix(pattern, "*") {
+			suffix := strings.TrimPrefix(pattern, "*")
+			return strings.HasSuffix(modelID, suffix)
+		}
+
+		// Substring match: "*sonnet*"
+		if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
+			substring := strings.Trim(pattern, "*")
+			return strings.Contains(modelID, substring)
+		}
+	}
+
+	return false
 }

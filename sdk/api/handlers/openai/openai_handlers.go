@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	log "github.com/sirupsen/logrus"
 )
 
 // OpenAIAPIHandler contains the handlers for OpenAI API endpoints.
@@ -61,6 +63,9 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
+
+	// Apply API key-based model filtering if quota tracker is available
+	allModels = applyModelFiltering(c, allModels)
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
 	filteredModels := make([]map[string]any, len(allModels))
@@ -681,4 +686,90 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
 		},
 	})
+}
+
+// applyModelFiltering filters models based on API key's allowed models.
+// Returns the original list if no filtering is configured.
+func applyModelFiltering(c *gin.Context, allModels []map[string]any) []map[string]any {
+	// Get authentication metadata from Gin context
+	var allowedModelsStr string
+	if meta, exists := c.Get("accessMetadata"); exists {
+		if metaMap, ok := meta.(map[string]string); ok {
+			allowedModelsStr = metaMap["allowed-models"]
+		}
+	}
+
+	if allowedModelsStr == "" {
+		// No restrictions, return all models
+		return allModels
+	}
+
+	// Parse allowed models
+	allowedModels := strings.Split(allowedModelsStr, ",")
+	if len(allowedModels) == 0 {
+		return allModels
+	}
+
+	// Filter models
+	filtered := make([]map[string]any, 0)
+	for _, model := range allModels {
+		modelID, ok := model["id"].(string)
+		if !ok {
+			continue
+		}
+
+		if isModelAllowed(modelID, allowedModels) {
+			filtered = append(filtered, model)
+		}
+	}
+
+	log.Debugf("Filtered models for API key: %d -> %d models", len(allModels), len(filtered))
+	return filtered
+}
+
+// isModelAllowed checks if a model ID matches any of the allowed patterns.
+// Supports wildcards: "gemini-*", "*-pro", "*flash*"
+func isModelAllowed(modelID string, allowedPatterns []string) bool {
+	for _, pattern := range allowedPatterns {
+		pattern = strings.TrimSpace(pattern)
+		if matchModelPattern(modelID, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchModelPattern checks if a model ID matches a pattern with wildcard support.
+func matchModelPattern(modelID, pattern string) bool {
+	// Exact match
+	if modelID == pattern {
+		return true
+	}
+
+	// Wildcard matching
+	if strings.Contains(pattern, "*") {
+		if pattern == "*" {
+			return true
+		}
+
+		// Prefix match: "gemini-*"
+		if strings.HasSuffix(pattern, "*") {
+			prefix := strings.TrimSuffix(pattern, "*")
+			return strings.HasPrefix(modelID, prefix)
+		}
+
+		// Suffix match: "*-pro"
+		if strings.HasPrefix(pattern, "*") {
+			suffix := strings.TrimPrefix(pattern, "*")
+			return strings.HasSuffix(modelID, suffix)
+		}
+
+		// Substring match: "*flash*"
+		if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
+			substring := strings.Trim(pattern, "*")
+			return strings.Contains(modelID, substring)
+		}
+	}
+
+	return false
 }

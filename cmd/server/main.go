@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
@@ -32,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -451,6 +453,24 @@ func main() {
 		sdkAuth.RegisterTokenStore(gitStoreInst)
 	} else {
 		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
+	}
+
+	// Initialize quota tracker if api-keys-extended is configured
+	var quotaTracker *quota.Tracker
+	if len(cfg.APIKeysExtended) > 0 {
+		var errQuota error
+		quotaTracker, errQuota = quota.NewTracker(cfg.APIKeysExtended, cfg.AuthDir)
+		if errQuota != nil {
+			log.Errorf("failed to initialize quota tracker: %v", errQuota)
+		} else {
+			log.Infof("Quota tracker initialized for %d API keys", len(cfg.APIKeysExtended))
+			configaccess.SetQuotaTracker(quotaTracker)
+			
+			// Register quota plugin to track token usage
+			quotaPlugin := quota.NewQuotaPlugin(quotaTracker)
+			coreusage.RegisterPlugin(quotaPlugin)
+			log.Infof("Quota usage plugin registered")
+		}
 	}
 
 	// Register built-in access providers before constructing services.
