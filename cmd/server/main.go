@@ -459,7 +459,8 @@ func main() {
 	var quotaTracker *quota.Tracker
 	if len(cfg.APIKeysExtended) > 0 {
 		var errQuota error
-		quotaTracker, errQuota = quota.NewTracker(cfg.APIKeysExtended, cfg.AuthDir)
+		// Always use /CLIProxyAPI for quota storage, ignore auth-dir
+		quotaTracker, errQuota = quota.NewTracker(cfg.APIKeysExtended, "/CLIProxyAPI")
 		if errQuota != nil {
 			log.Errorf("failed to initialize quota tracker: %v", errQuota)
 		} else {
